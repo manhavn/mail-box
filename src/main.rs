@@ -1,15 +1,19 @@
-use std::{path::PathBuf, pin::Pin, sync::Arc};
+use std::{path::PathBuf, pin::Pin, sync::Arc, time::SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
-use mongodb::{Client as MongoClient, bson::doc};
+use mongodb::{
+    Client as MongoClient,
+    bson::{DateTime as BsonDateTime, doc},
+};
 use rcgen::generate_simple_self_signed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    time,
 };
 use tokio_rustls::{
     TlsAcceptor,
@@ -80,9 +84,21 @@ struct Args {
     /// MongoDB collection name.
     #[arg(long, default_value = "emails", env = "MAIL_BOX_MONGODB_COLLECTION")]
     mongodb_collection: String,
+
+    /// Disable automatic cleanup of old received data.
+    #[arg(long, env = "MAIL_BOX_NO_CLEANUP")]
+    no_cleanup: bool,
+
+    /// Cleanup interval in minutes.
+    #[arg(long, default_value_t = 5, env = "MAIL_BOX_CLEANUP_INTERVAL_MINUTES")]
+    cleanup_interval_minutes: u64,
+
+    /// Delete received data older than this many minutes.
+    #[arg(long, default_value_t = 30, env = "MAIL_BOX_CLEANUP_RETENTION_MINUTES")]
+    cleanup_retention_minutes: i64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WebhookConfig {
     url: String,
 }
@@ -103,7 +119,7 @@ struct MongoTarget {
     collection: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ReceivedEmail {
     peer_addr: String,
     from: String,
@@ -136,6 +152,10 @@ async fn main() -> Result<()> {
         &state.args,
         format_args!("listening on {}", listener.local_addr()?),
     );
+
+    if !state.args.no_cleanup {
+        tokio::spawn(run_cleanup_loop(Arc::clone(&state)));
+    }
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
@@ -447,6 +467,164 @@ async fn save_mongodb(email: &ReceivedEmail, mongo: &MongoTarget) -> Result<()> 
         .insert_one(email)
         .await
         .context("failed to save to MongoDB")?;
+    Ok(())
+}
+
+async fn run_cleanup_loop(state: Arc<AppState>) {
+    if let Err(error) = cleanup_old_data(&state).await {
+        eprintln!("cleanup error: {error:#}");
+    }
+
+    let interval_minutes = state.args.cleanup_interval_minutes.max(1);
+    let mut interval = time::interval(time::Duration::from_secs(interval_minutes * 60));
+
+    loop {
+        interval.tick().await;
+
+        if let Err(error) = cleanup_old_data(&state).await {
+            eprintln!("cleanup error: {error:#}");
+        }
+    }
+}
+
+async fn cleanup_old_data(state: &AppState) -> Result<()> {
+    let retention_minutes = state.args.cleanup_retention_minutes.max(1);
+    let cutoff = Utc::now() - Duration::minutes(retention_minutes);
+
+    log_debug(
+        &state.args,
+        format_args!("cleanup started for data older than {cutoff}"),
+    );
+
+    if state.args.save_transcript && !state.args.no_save_transcript {
+        cleanup_transcripts(&state.args, cutoff).await?;
+    }
+
+    if state.args.firebase_url.is_some() {
+        cleanup_firebase(state, cutoff).await?;
+    }
+
+    if let Some(mongo) = state.mongo.as_ref() {
+        cleanup_mongodb(mongo, cutoff, &state.args).await?;
+    }
+
+    Ok(())
+}
+
+async fn cleanup_transcripts(args: &Args, cutoff: DateTime<Utc>) -> Result<()> {
+    let mut entries = match fs::read_dir(&args.transcript_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("failed to read transcript directory"),
+    };
+
+    let mut deleted = 0_u64;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = entry.metadata().await?;
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let modified_at = DateTime::<Utc>::from(modified);
+
+        if modified_at < cutoff {
+            fs::remove_file(entry.path()).await?;
+            deleted += 1;
+        }
+    }
+
+    log_debug(
+        args,
+        format_args!("cleanup deleted {deleted} transcript file(s)"),
+    );
+    Ok(())
+}
+
+async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()> {
+    let args = &state.args;
+    let base_url = args.firebase_url.as_deref().expect("checked by caller");
+    let base_path = format!(
+        "{}/{}.json",
+        base_url.trim_end_matches('/'),
+        args.firebase_path.trim_matches('/')
+    );
+    let mut url = format!(
+        "{base_path}?orderBy=\"received_at\"&endAt=\"{}\"",
+        cutoff.to_rfc3339()
+    );
+
+    if let Some(auth) = args.firebase_auth.as_ref() {
+        url.push_str("&auth=");
+        url.push_str(auth);
+    }
+
+    let old_items = state
+        .http
+        .get(&url)
+        .send()
+        .await
+        .context("failed to query Firebase cleanup data")?
+        .error_for_status()
+        .context("Firebase cleanup query returned error status")?
+        .json::<serde_json::Value>()
+        .await
+        .context("failed to parse Firebase cleanup response")?;
+
+    let Some(items) = old_items.as_object() else {
+        return Ok(());
+    };
+
+    let mut deleted = 0_u64;
+
+    for key in items.keys() {
+        let mut delete_url = format!(
+            "{}/{}/{}.json",
+            base_url.trim_end_matches('/'),
+            args.firebase_path.trim_matches('/'),
+            key
+        );
+
+        if let Some(auth) = args.firebase_auth.as_ref() {
+            delete_url.push_str("?auth=");
+            delete_url.push_str(auth);
+        }
+
+        state
+            .http
+            .delete(&delete_url)
+            .send()
+            .await
+            .context("failed to delete Firebase cleanup item")?
+            .error_for_status()
+            .context("Firebase cleanup delete returned error status")?;
+        deleted += 1;
+    }
+
+    log_debug(
+        args,
+        format_args!("cleanup deleted {deleted} Firebase item(s)"),
+    );
+    Ok(())
+}
+
+async fn cleanup_mongodb(mongo: &MongoTarget, cutoff: DateTime<Utc>, args: &Args) -> Result<()> {
+    let collection = mongo
+        .client
+        .database(&mongo.database)
+        .collection::<ReceivedEmail>(&mongo.collection);
+    let bson_cutoff = BsonDateTime::from_millis(cutoff.timestamp_millis());
+    let result = collection
+        .delete_many(doc! { "received_at": { "$lt": bson_cutoff } })
+        .await
+        .context("failed to cleanup MongoDB")?;
+
+    log_debug(
+        args,
+        format_args!("cleanup deleted {} MongoDB item(s)", result.deleted_count),
+    );
     Ok(())
 }
 

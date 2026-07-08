@@ -16,6 +16,7 @@ This tool is intentionally permissive. It is not a secure production mail server
 - Print debug logs to stdout.
 - Save received email data to Firebase Realtime Database.
 - Save received email data to MongoDB.
+- Automatically delete old received data from enabled storage modes.
 
 ## Build
 
@@ -93,7 +94,8 @@ Port `25` usually requires root privileges on Linux. For local testing without `
 7. The client sends `MAIL FROM`, `RCPT TO`, and `DATA`.
 8. The server accepts the message and replies with `250 message accepted`.
 9. After the message is accepted, enabled processing modes run: transcript saving, webhook delivery, Firebase saving, and MongoDB saving.
-10. The client may send `QUIT` to close the SMTP session.
+10. A cleanup task runs immediately when the app starts, then repeats every 5 minutes by default.
+11. The client may send `QUIT` to close the SMTP session.
 
 Unknown SMTP commands receive `250 ok` so the server remains permissive and avoids rejecting messages from clients that send extra commands.
 
@@ -278,6 +280,47 @@ MAIL_BOX_MONGODB_DATABASE=mail_box
 MAIL_BOX_MONGODB_COLLECTION=emails
 ```
 
+### Automatic Cleanup
+
+Automatic cleanup is enabled by default. It runs once immediately when the app starts, then repeats every 5 minutes.
+
+Default cleanup behavior:
+
+- Interval: 5 minutes
+- Retention: 30 minutes
+- Transcript files: deletes old files from the configured transcript directory when transcript saving is enabled
+- Firebase: deletes old records from the configured Firebase path when Firebase mode is enabled
+- MongoDB: deletes old records from the configured database and collection when MongoDB mode is enabled
+- Webhook: no cleanup is performed because webhook delivery is not stored locally by `mail-box`
+
+Configure the cleanup interval:
+
+```sh
+--cleanup-interval-minutes 5
+```
+
+Configure the retention period:
+
+```sh
+--cleanup-retention-minutes 30
+```
+
+Disable automatic cleanup:
+
+```sh
+--no-cleanup
+```
+
+Environment variables:
+
+```sh
+MAIL_BOX_CLEANUP_INTERVAL_MINUTES=5
+MAIL_BOX_CLEANUP_RETENTION_MINUTES=30
+MAIL_BOX_NO_CLEANUP=true
+```
+
+Firebase cleanup queries records by `received_at` and deletes matching keys one by one. MongoDB cleanup deletes records where `received_at` is older than the retention cutoff. Transcript cleanup uses each file's modified time.
+
 ## Stored Payload
 
 Webhook, Firebase, and MongoDB modes use the same payload shape:
@@ -318,6 +361,8 @@ Run with all processing modes enabled:
 ```sh
 sudo ./target/release/mail-box \
   --debug \
+  --cleanup-interval-minutes 5 \
+  --cleanup-retention-minutes 30 \
   --webhook-config webhook.json \
   --firebase-url https://your-project.firebaseio.com \
   --firebase-path emails \
