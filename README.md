@@ -31,6 +31,43 @@ The release binary will be created at:
 target/release/mail-box
 ```
 
+Build for the current machine explicitly:
+
+```sh
+./build-release.sh --native
+```
+
+Build one target triple:
+
+```sh
+./build-release.sh --target x86_64-unknown-linux-gnu
+```
+
+Build common Linux, Windows, and macOS amd64/arm64 targets:
+
+```sh
+./build-release.sh --all
+```
+
+Common targets:
+
+- `x86_64-unknown-linux-gnu`: Linux amd64 glibc
+- `aarch64-unknown-linux-gnu`: Linux arm64 glibc
+- `x86_64-unknown-linux-musl`: Linux amd64 static/musl
+- `aarch64-unknown-linux-musl`: Linux arm64 static/musl
+- `x86_64-pc-windows-gnu`: Windows amd64
+- `aarch64-pc-windows-gnullvm`: Windows arm64
+- `x86_64-apple-darwin`: macOS amd64
+- `aarch64-apple-darwin`: macOS arm64
+
+Cross-compilation works best with `cargo-zigbuild` and `zig` installed:
+
+```sh
+cargo install cargo-zigbuild
+```
+
+Native builds only require `cargo`. macOS targets normally require Apple's SDK/toolchain and are best built on macOS.
+
 ## Run
 
 Run with defaults:
