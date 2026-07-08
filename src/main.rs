@@ -9,6 +9,7 @@ use mongodb::{
 };
 use rcgen::generate_simple_self_signed;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::{
     fs,
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
@@ -127,6 +128,25 @@ struct ReceivedEmail {
     data: String,
     transcript: String,
     received_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EmailSummary {
+    from: String,
+    recipients: Vec<String>,
+    received_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MessageGroupMetadata {
+    count: serde_json::Value,
+    last_message_id: String,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FirebasePostResponse {
+    name: String,
 }
 
 #[tokio::main]
@@ -431,18 +451,13 @@ async fn call_webhook(
 async fn save_firebase(email: &ReceivedEmail, state: &AppState) -> Result<()> {
     let args = &state.args;
     let base_url = args.firebase_url.as_deref().expect("checked by caller");
-    let mut url = format!(
-        "{}/{}.json",
-        base_url.trim_end_matches('/'),
-        args.firebase_path.trim_matches('/')
+    let group = args.firebase_path.trim_matches('/');
+    let url = firebase_url(
+        base_url,
+        &format!("messages/{group}"),
+        args.firebase_auth.as_deref(),
     );
-
-    if let Some(auth) = args.firebase_auth.as_ref() {
-        url.push_str("?auth=");
-        url.push_str(auth);
-    }
-
-    state
+    let response = state
         .http
         .post(&url)
         .json(email)
@@ -450,7 +465,50 @@ async fn save_firebase(email: &ReceivedEmail, state: &AppState) -> Result<()> {
         .await
         .context("failed to save to Firebase")?
         .error_for_status()
-        .context("Firebase returned error status")?;
+        .context("Firebase returned error status")?
+        .json::<FirebasePostResponse>()
+        .await
+        .context("failed to parse Firebase push response")?;
+
+    let summary = EmailSummary {
+        from: email.from.clone(),
+        recipients: email.recipients.clone(),
+        received_at: email.received_at,
+    };
+    let summary_url = firebase_url(
+        base_url,
+        &format!("messageSummaries/{group}/{}", response.name),
+        args.firebase_auth.as_deref(),
+    );
+    state
+        .http
+        .put(&summary_url)
+        .json(&summary)
+        .send()
+        .await
+        .context("failed to save Firebase message summary")?
+        .error_for_status()
+        .context("Firebase summary write returned error status")?;
+
+    let metadata = MessageGroupMetadata {
+        count: json!({ ".sv": { "increment": 1 } }),
+        last_message_id: response.name.clone(),
+        updated_at: email.received_at,
+    };
+    let group_url = firebase_url(
+        base_url,
+        &format!("messageGroups/{group}"),
+        args.firebase_auth.as_deref(),
+    );
+    state
+        .http
+        .patch(&group_url)
+        .json(&metadata)
+        .send()
+        .await
+        .context("failed to update Firebase message group metadata")?
+        .error_for_status()
+        .context("Firebase group metadata write returned error status")?;
     log_debug(
         args,
         format_args!("saved to Firebase path {}", args.firebase_path),
@@ -553,16 +611,12 @@ async fn cleanup_transcripts(args: &Args, cutoff: DateTime<Utc>) -> Result<()> {
 async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()> {
     let args = &state.args;
     let base_url = args.firebase_url.as_deref().expect("checked by caller");
-    let mut url = format!(
-        "{}/{}.json",
-        base_url.trim_end_matches('/'),
-        args.firebase_path.trim_matches('/')
+    let group = args.firebase_path.trim_matches('/');
+    let url = firebase_url(
+        base_url,
+        &format!("messages/{group}"),
+        args.firebase_auth.as_deref(),
     );
-
-    if let Some(auth) = args.firebase_auth.as_ref() {
-        url.push_str("?auth=");
-        url.push_str(auth);
-    }
 
     let items = state
         .http
@@ -587,17 +641,11 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
             continue;
         }
 
-        let mut delete_url = format!(
-            "{}/{}/{}.json",
-            base_url.trim_end_matches('/'),
-            args.firebase_path.trim_matches('/'),
-            key
+        let delete_url = firebase_url(
+            base_url,
+            &format!("messages/{group}/{key}"),
+            args.firebase_auth.as_deref(),
         );
-
-        if let Some(auth) = args.firebase_auth.as_ref() {
-            delete_url.push_str("?auth=");
-            delete_url.push_str(auth);
-        }
 
         state
             .http
@@ -607,7 +655,41 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
             .context("failed to delete Firebase cleanup item")?
             .error_for_status()
             .context("Firebase cleanup delete returned error status")?;
+        let summary_delete_url = firebase_url(
+            base_url,
+            &format!("messageSummaries/{group}/{key}"),
+            args.firebase_auth.as_deref(),
+        );
+        state
+            .http
+            .delete(&summary_delete_url)
+            .send()
+            .await
+            .context("failed to delete Firebase cleanup summary")?
+            .error_for_status()
+            .context("Firebase cleanup summary delete returned error status")?;
         deleted += 1;
+    }
+
+    if deleted > 0 {
+        let group_url = firebase_url(
+            base_url,
+            &format!("messageGroups/{group}"),
+            args.firebase_auth.as_deref(),
+        );
+        let metadata = json!({
+            "count": { ".sv": { "increment": -(deleted as i64) } },
+            "updated_at": Utc::now(),
+        });
+        state
+            .http
+            .patch(&group_url)
+            .json(&metadata)
+            .send()
+            .await
+            .context("failed to update Firebase cleanup group metadata")?
+            .error_for_status()
+            .context("Firebase cleanup group metadata returned error status")?;
     }
 
     log_debug(
@@ -615,6 +697,21 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
         format_args!("cleanup deleted {deleted} Firebase item(s)"),
     );
     Ok(())
+}
+
+fn firebase_url(base_url: &str, path: &str, auth: Option<&str>) -> String {
+    let mut url = format!(
+        "{}/{}.json",
+        base_url.trim_end_matches('/'),
+        path.trim_matches('/')
+    );
+
+    if let Some(auth) = auth {
+        url.push_str("?auth=");
+        url.push_str(auth);
+    }
+
+    url
 }
 
 fn firebase_item_is_older_than(item: &serde_json::Value, cutoff: DateTime<Utc>) -> bool {

@@ -255,11 +255,15 @@ MAIL_BOX_FIREBASE_AUTH=YOUR_FIREBASE_TOKEN
 MAIL_BOX_FIREBASE_PATH=emails
 ```
 
-The server writes data by sending `POST` requests to:
+The server writes Firebase data to three Realtime Database areas:
 
 ```text
-{firebase-url}/{firebase-path}.json
+messages/{firebase-path}/{message-id}
+messageSummaries/{firebase-path}/{message-id}
+messageGroups/{firebase-path}
 ```
+
+`messages` stores the full payload, `messageSummaries` stores lightweight list data, and `messageGroups` stores realtime group metadata such as message count and the latest message id.
 
 ### MongoDB Mode
 
@@ -289,7 +293,7 @@ Default cleanup behavior:
 - Interval: 5 minutes
 - Retention: 30 minutes
 - Transcript files: deletes old files from the configured transcript directory when transcript saving is enabled
-- Firebase: deletes old records from the configured Firebase path when Firebase mode is enabled
+- Firebase: deletes old full records and summaries from the configured Firebase path when Firebase mode is enabled, then decrements the group count
 - MongoDB: deletes old records from the configured database and collection when MongoDB mode is enabled
 - Webhook: no cleanup is performed because webhook delivery is not stored locally by `mail-box`
 
