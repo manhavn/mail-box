@@ -319,7 +319,7 @@ MAIL_BOX_CLEANUP_RETENTION_MINUTES=30
 MAIL_BOX_NO_CLEANUP=true
 ```
 
-Firebase cleanup queries records by `received_at` and deletes matching keys one by one. MongoDB cleanup deletes records where `received_at` is older than the retention cutoff. Transcript cleanup uses each file's modified time.
+Firebase cleanup reads the configured path, filters records by `received_at` locally, and deletes matching keys one by one, so the configured Firebase database rules or `--firebase-auth` token must allow both read and delete access on the configured path. MongoDB cleanup deletes records where `received_at` is older than the retention cutoff. Transcript cleanup uses each file's modified time.
 
 ## Stored Payload
 

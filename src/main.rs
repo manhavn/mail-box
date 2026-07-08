@@ -477,6 +477,7 @@ async fn run_cleanup_loop(state: Arc<AppState>) {
 
     let interval_minutes = state.args.cleanup_interval_minutes.max(1);
     let mut interval = time::interval(time::Duration::from_secs(interval_minutes * 60));
+    interval.tick().await;
 
     loop {
         interval.tick().await;
@@ -497,15 +498,21 @@ async fn cleanup_old_data(state: &AppState) -> Result<()> {
     );
 
     if state.args.save_transcript && !state.args.no_save_transcript {
-        cleanup_transcripts(&state.args, cutoff).await?;
+        if let Err(error) = cleanup_transcripts(&state.args, cutoff).await {
+            eprintln!("transcript cleanup error: {error:#}");
+        }
     }
 
     if state.args.firebase_url.is_some() {
-        cleanup_firebase(state, cutoff).await?;
+        if let Err(error) = cleanup_firebase(state, cutoff).await {
+            eprintln!("Firebase cleanup error: {error:#}");
+        }
     }
 
     if let Some(mongo) = state.mongo.as_ref() {
-        cleanup_mongodb(mongo, cutoff, &state.args).await?;
+        if let Err(error) = cleanup_mongodb(mongo, cutoff, &state.args).await {
+            eprintln!("MongoDB cleanup error: {error:#}");
+        }
     }
 
     Ok(())
@@ -546,22 +553,18 @@ async fn cleanup_transcripts(args: &Args, cutoff: DateTime<Utc>) -> Result<()> {
 async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()> {
     let args = &state.args;
     let base_url = args.firebase_url.as_deref().expect("checked by caller");
-    let base_path = format!(
+    let mut url = format!(
         "{}/{}.json",
         base_url.trim_end_matches('/'),
         args.firebase_path.trim_matches('/')
     );
-    let mut url = format!(
-        "{base_path}?orderBy=\"received_at\"&endAt=\"{}\"",
-        cutoff.to_rfc3339()
-    );
 
     if let Some(auth) = args.firebase_auth.as_ref() {
-        url.push_str("&auth=");
+        url.push_str("?auth=");
         url.push_str(auth);
     }
 
-    let old_items = state
+    let items = state
         .http
         .get(&url)
         .send()
@@ -573,13 +576,17 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
         .await
         .context("failed to parse Firebase cleanup response")?;
 
-    let Some(items) = old_items.as_object() else {
+    let Some(items) = items.as_object() else {
         return Ok(());
     };
 
     let mut deleted = 0_u64;
 
-    for key in items.keys() {
+    for (key, item) in items {
+        if !firebase_item_is_older_than(item, cutoff) {
+            continue;
+        }
+
         let mut delete_url = format!(
             "{}/{}/{}.json",
             base_url.trim_end_matches('/'),
@@ -608,6 +615,14 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
         format_args!("cleanup deleted {deleted} Firebase item(s)"),
     );
     Ok(())
+}
+
+fn firebase_item_is_older_than(item: &serde_json::Value, cutoff: DateTime<Utc>) -> bool {
+    item.get("received_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|received_at| DateTime::parse_from_rfc3339(received_at).ok())
+        .map(|received_at| received_at.with_timezone(&Utc) < cutoff)
+        .unwrap_or(false)
 }
 
 async fn cleanup_mongodb(mongo: &MongoTarget, cutoff: DateTime<Utc>, args: &Args) -> Result<()> {
