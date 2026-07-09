@@ -239,7 +239,7 @@ Run with Firebase enabled:
   --firebase-path emails
 ```
 
-If your Firebase rules require authentication:
+If your Firebase write rules require authentication:
 
 ```sh
 ./target/release/mail-box \
@@ -265,6 +265,24 @@ messageCleanup/{firebase-path}/{message-id}
 ```
 
 `messages` stores the full payload, `messageSummaries` stores lightweight list data, `messageGroups` stores realtime group metadata such as message count and the latest message id, and `messageCleanup` stores only `received_at` timestamps for public-read cleanup scans.
+
+Recommended Firebase Realtime Database rules for the companion web app:
+
+```json
+{
+  "rules": {
+    ".read": "auth != null",
+    "messageCleanup": {
+      ".read": true
+    },
+    ".write": true
+  }
+}
+```
+
+With these rules, full message data and list summaries are only readable by signed-in Firebase users. `messageCleanup` is intentionally public-read because it contains only retention metadata, not email content. This lets `mail-box` scan for expired records without reading `messages`.
+
+If you change `.write` to require auth, provide `--firebase-auth` or `MAIL_BOX_FIREBASE_AUTH` with a token that can write and delete all four Firebase paths.
 
 ### MongoDB Mode
 
@@ -324,7 +342,7 @@ MAIL_BOX_CLEANUP_RETENTION_MINUTES=30
 MAIL_BOX_NO_CLEANUP=true
 ```
 
-Firebase cleanup reads the configured path, filters records by `received_at` locally, and deletes matching keys one by one, so the configured Firebase database rules or `--firebase-auth` token must allow both read and delete access on the configured path. MongoDB cleanup deletes records where `received_at` is older than the retention cutoff. Transcript cleanup uses each file's modified time.
+Firebase cleanup reads `messageCleanup/{firebase-path}`, filters records by `received_at` locally, and deletes matching keys one by one from `messages`, `messageSummaries`, and `messageCleanup`. It also decrements `messageGroups/{firebase-path}/count`. MongoDB cleanup deletes records where `received_at` is older than the retention cutoff. Transcript cleanup uses each file's modified time.
 
 ## Stored Payload
 
