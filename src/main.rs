@@ -125,6 +125,7 @@ struct ReceivedEmail {
     peer_addr: String,
     from: String,
     recipients: Vec<String>,
+    subject: String,
     data: String,
     transcript: String,
     received_at: DateTime<Utc>,
@@ -134,6 +135,7 @@ struct ReceivedEmail {
 struct EmailSummary {
     from: String,
     recipients: Vec<String>,
+    subject: String,
     received_at: DateTime<Utc>,
 }
 
@@ -478,6 +480,7 @@ async fn save_firebase(email: &ReceivedEmail, state: &AppState) -> Result<()> {
     let summary = EmailSummary {
         from: email.from.clone(),
         recipients: email.recipients.clone(),
+        subject: email.subject.clone(),
         received_at: email.received_at,
     };
     let summary_url = firebase_url(
@@ -820,10 +823,148 @@ impl SmtpSession {
             peer_addr: self.peer_addr.clone(),
             from: self.from.clone(),
             recipients: self.recipients.clone(),
+            subject: parse_email_subject(&self.data),
             data: self.data.clone(),
             transcript: self.transcript.clone(),
             received_at: self.received_at,
         }
+    }
+}
+
+fn parse_email_subject(data: &str) -> String {
+    let mut subject = String::new();
+    let mut in_subject = false;
+
+    for line in data.lines() {
+        if line.trim().is_empty() {
+            break;
+        }
+
+        if in_subject && (line.starts_with(' ') || line.starts_with('\t')) {
+            subject.push(' ');
+            subject.push_str(line.trim());
+            continue;
+        }
+
+        in_subject = false;
+        if let Some(value) = line.strip_prefix("Subject:") {
+            subject.push_str(value.trim());
+            in_subject = true;
+        }
+    }
+
+    decode_rfc2047_words(subject.trim())
+}
+
+fn decode_rfc2047_words(input: &str) -> String {
+    let mut output = String::new();
+    let mut rest = input;
+
+    while let Some(start) = rest.find("=?") {
+        output.push_str(&rest[..start]);
+        let encoded = &rest[start + 2..];
+        let Some(charset_end) = encoded.find('?') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let charset = &encoded[..charset_end];
+        let encoded = &encoded[charset_end + 1..];
+        let Some(encoding_end) = encoded.find('?') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let encoding = &encoded[..encoding_end];
+        let encoded = &encoded[encoding_end + 1..];
+        let Some(value_end) = encoded.find("?=") else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let value = &encoded[..value_end];
+
+        let decoded = match encoding.to_ascii_uppercase().as_str() {
+            "B" => decode_base64(value),
+            "Q" => Some(decode_rfc2047_q(value)),
+            _ => None,
+        };
+
+        if charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("us-ascii") {
+            if let Some(bytes) = decoded {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+            } else {
+                output.push_str(
+                    &rest[start..start + 2 + charset_end + 1 + encoding_end + 1 + value_end + 2],
+                );
+            }
+        }
+
+        rest = &encoded[value_end + 2..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn decode_rfc2047_q(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chars = value.as_bytes().iter().copied();
+
+    while let Some(byte) = chars.next() {
+        if byte == b'_' {
+            bytes.push(b' ');
+        } else if byte == b'=' {
+            let Some(high) = chars.next() else { break };
+            let Some(low) = chars.next() else { break };
+            if let (Some(high), Some(low)) = (hex_value(high), hex_value(low)) {
+                bytes.push(high * 16 + low);
+            }
+        } else {
+            bytes.push(byte);
+        }
+    }
+
+    bytes
+}
+
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+    let mut output = Vec::new();
+
+    for byte in value.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+
+        let value = base64_value(byte)?;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+
+        while bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+
+    Some(output)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
