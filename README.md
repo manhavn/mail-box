@@ -261,9 +261,10 @@ The server writes Firebase data to three Realtime Database areas:
 messages/{firebase-path}/{message-id}
 messageSummaries/{firebase-path}/{message-id}
 messageGroups/{firebase-path}
+messageCleanup/{firebase-path}/{message-id}
 ```
 
-`messages` stores the full payload, `messageSummaries` stores lightweight list data, and `messageGroups` stores realtime group metadata such as message count and the latest message id.
+`messages` stores the full payload, `messageSummaries` stores lightweight list data, `messageGroups` stores realtime group metadata such as message count and the latest message id, and `messageCleanup` stores only `received_at` timestamps for public-read cleanup scans.
 
 ### MongoDB Mode
 
@@ -293,7 +294,7 @@ Default cleanup behavior:
 - Interval: 5 minutes
 - Retention: 30 minutes
 - Transcript files: deletes old files from the configured transcript directory when transcript saving is enabled
-- Firebase: deletes old full records and summaries from the configured Firebase path when Firebase mode is enabled, then decrements the group count
+- Firebase: reads public cleanup metadata, deletes old full records, summaries, and cleanup metadata from the configured Firebase path when Firebase mode is enabled, then decrements the group count
 - MongoDB: deletes old records from the configured database and collection when MongoDB mode is enabled
 - Webhook: no cleanup is performed because webhook delivery is not stored locally by `mail-box`
 

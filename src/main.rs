@@ -144,6 +144,11 @@ struct MessageGroupMetadata {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CleanupMetadata {
+    received_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct FirebasePostResponse {
     name: String,
@@ -490,6 +495,24 @@ async fn save_firebase(email: &ReceivedEmail, state: &AppState) -> Result<()> {
         .error_for_status()
         .context("Firebase summary write returned error status")?;
 
+    let cleanup = CleanupMetadata {
+        received_at: email.received_at,
+    };
+    let cleanup_url = firebase_url(
+        base_url,
+        &format!("messageCleanup/{group}/{}", response.name),
+        args.firebase_auth.as_deref(),
+    );
+    state
+        .http
+        .put(&cleanup_url)
+        .json(&cleanup)
+        .send()
+        .await
+        .context("failed to save Firebase cleanup metadata")?
+        .error_for_status()
+        .context("Firebase cleanup metadata write returned error status")?;
+
     let metadata = MessageGroupMetadata {
         count: json!({ ".sv": { "increment": 1 } }),
         last_message_id: response.name.clone(),
@@ -614,7 +637,7 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
     let group = args.firebase_path.trim_matches('/');
     let url = firebase_url(
         base_url,
-        &format!("messages/{group}"),
+        &format!("messageCleanup/{group}"),
         args.firebase_auth.as_deref(),
     );
 
@@ -668,6 +691,19 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
             .context("failed to delete Firebase cleanup summary")?
             .error_for_status()
             .context("Firebase cleanup summary delete returned error status")?;
+        let cleanup_delete_url = firebase_url(
+            base_url,
+            &format!("messageCleanup/{group}/{key}"),
+            args.firebase_auth.as_deref(),
+        );
+        state
+            .http
+            .delete(&cleanup_delete_url)
+            .send()
+            .await
+            .context("failed to delete Firebase cleanup metadata")?
+            .error_for_status()
+            .context("Firebase cleanup metadata delete returned error status")?;
         deleted += 1;
     }
 
