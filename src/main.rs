@@ -555,6 +555,9 @@ async fn save_mongodb(email: &ReceivedEmail, mongo: &MongoTarget) -> Result<()> 
 }
 
 async fn run_cleanup_loop(state: Arc<AppState>) {
+    // Delay 30 seconds before the first cleanup check on startup
+    time::sleep(time::Duration::from_secs(30)).await;
+
     if let Err(error) = cleanup_old_data(&state).await {
         eprintln!("cleanup error: {error:#}");
     }
