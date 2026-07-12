@@ -708,24 +708,55 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
         }
 
         if deleted > 0 {
-            let group_url = firebase_url(
-                base_url,
-                &format!("messageGroups/{group}"),
-                args.firebase_auth.as_deref(),
-            );
-            let metadata = json!({
-                "count": { ".sv": { "increment": -(deleted as i64) } },
-                "updated_at": Utc::now(),
-            });
-            state
-                .http
-                .patch(&group_url)
-                .json(&metadata)
-                .send()
-                .await
-                .context("failed to update Firebase cleanup group metadata")?
-                .error_for_status()
-                .context("Firebase cleanup group metadata returned error status")?;
+            if deleted == items.len() as u64 {
+                log_debug(
+                    args,
+                    format_args!(
+                        "group '{}' has count 0 after deletion, deleting all related data",
+                        group
+                    ),
+                );
+
+                let paths_to_delete = [
+                    format!("messages/{group}"),
+                    format!("messageSummaries/{group}"),
+                    format!("messageCleanup/{group}"),
+                    format!("messageGroups/{group}"),
+                ];
+
+                for path in &paths_to_delete {
+                    let delete_url = firebase_url(base_url, path, args.firebase_auth.as_deref());
+                    state
+                        .http
+                        .delete(&delete_url)
+                        .send()
+                        .await
+                        .context(format!("failed to delete Firebase path: {path}"))?
+                        .error_for_status()
+                        .context(format!(
+                            "Firebase delete returned error status for path: {path}"
+                        ))?;
+                }
+            } else {
+                let group_url = firebase_url(
+                    base_url,
+                    &format!("messageGroups/{group}"),
+                    args.firebase_auth.as_deref(),
+                );
+                let metadata = json!({
+                    "count": { ".sv": { "increment": -(deleted as i64) } },
+                    "updated_at": Utc::now(),
+                });
+                state
+                    .http
+                    .patch(&group_url)
+                    .json(&metadata)
+                    .send()
+                    .await
+                    .context("failed to update Firebase cleanup group metadata")?
+                    .error_for_status()
+                    .context("Firebase cleanup group metadata returned error status")?;
+            }
         }
 
         log_debug(
