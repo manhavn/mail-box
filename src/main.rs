@@ -766,58 +766,36 @@ async fn cleanup_firebase(state: &AppState, cutoff: DateTime<Utc>) -> Result<()>
             args,
             format_args!("cleanup deleted {deleted} Firebase item(s)"),
         );
-    }
+    } else {
+        // If there are no items under messageCleanup/{group}, the group is empty.
+        // Directly delete all paths for this group, especially messageGroups/{group}
+        log_debug(
+            args,
+            format_args!(
+                "group '{}' has no cleanup items, deleting all related group data",
+                group
+            ),
+        );
 
-    // Check all message groups and delete any that have count <= 0
-    let groups_url = firebase_url(base_url, "messageGroups", args.firebase_auth.as_deref());
-    let groups = state
-        .http
-        .get(&groups_url)
-        .send()
-        .await
-        .context("failed to query Firebase message groups")?
-        .error_for_status()
-        .context("Firebase message groups query returned error status")?
-        .json::<serde_json::Value>()
-        .await
-        .context("failed to parse Firebase message groups response")?;
+        let paths_to_delete = [
+            format!("messages/{group}"),
+            format!("messageSummaries/{group}"),
+            format!("messageCleanup/{group}"),
+            format!("messageGroups/{group}"),
+        ];
 
-    if let Some(groups_obj) = groups.as_object() {
-        for (g_name, g_meta) in groups_obj {
-            let count = g_meta
-                .get("count")
-                .and_then(|c| c.as_i64().or_else(|| c.as_f64().map(|f| f as i64)))
-                .unwrap_or(0);
-            if count <= 0 {
-                log_debug(
-                    args,
-                    format_args!(
-                        "group '{}' has count <= 0, deleting all related data",
-                        g_name
-                    ),
-                );
-
-                let paths_to_delete = [
-                    format!("messages/{g_name}"),
-                    format!("messageSummaries/{g_name}"),
-                    format!("messageCleanup/{g_name}"),
-                    format!("messageGroups/{g_name}"),
-                ];
-
-                for path in &paths_to_delete {
-                    let delete_url = firebase_url(base_url, path, args.firebase_auth.as_deref());
-                    state
-                        .http
-                        .delete(&delete_url)
-                        .send()
-                        .await
-                        .context(format!("failed to delete Firebase path: {path}"))?
-                        .error_for_status()
-                        .context(format!(
-                            "Firebase delete returned error status for path: {path}"
-                        ))?;
-                }
-            }
+        for path in &paths_to_delete {
+            let delete_url = firebase_url(base_url, path, args.firebase_auth.as_deref());
+            state
+                .http
+                .delete(&delete_url)
+                .send()
+                .await
+                .context(format!("failed to delete Firebase path: {path}"))?
+                .error_for_status()
+                .context(format!(
+                    "Firebase delete returned error status for path: {path}"
+                ))?;
         }
     }
 
