@@ -26,7 +26,7 @@ Options:
   --native              Build the current machine target. This is the default.
   --target <triple>     Build one Rust target triple.
   --all                 Build common Linux, Windows, and macOS amd64/arm64 targets.
-  --no-checks           Skip cargo fmt --check and cargo check.
+  --no-checks           Skip cargo check.
   -h, --help            Show this help.
 
 Common targets:
@@ -83,8 +83,9 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+cargo fmt
+
 if [ "$RUN_CHECKS" -eq 1 ]; then
-  cargo fmt --check
   cargo check
 fi
 
