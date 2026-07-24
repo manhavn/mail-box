@@ -1,0 +1,19 @@
+# build app and push app image
+
+./build-release.sh --target x86_64-unknown-linux-musl
+
+podman create --name mail-box docker.io/library/alpine:latest mail-box
+podman cp target/x86_64-unknown-linux-musl/release/mail-box mail-box:/bin/
+
+podman commit mail-box docker.io/manhavn/mail-box:1.0.6
+podman commit mail-box ghcr.io/manhavn/mail-box:1.0.6
+
+echo "dckr_pat_xxxtokenxxx" | podman login docker.io -u manhavn --password-stdin
+echo "ghp_xxxtokenxxx" | podman login ghcr.io -u manhavn --password-stdin
+
+podman push docker.io/manhavn/mail-box:1.0.6
+podman push ghcr.io/manhavn/mail-box:1.0.6
+
+# server podman run
+podman run --rm --name mail-box -e MAIL_BOX_BIND=0.0.0.0:2525 -e MAIL_BOX_NO_SAVE_TRANSCRIPT=true -e MAIL_BOX_FIREBASE_URL='https://xxxxxxxxx-xxxxxxx-rtdb.xxxx-xxxxxxx.firebasedatabase.app' -e MAIL_BOX_FIREBASE_PATH='vpstestname123' -p 25:2525 -it ghcr.io/manhavn/mail-box:1.0.6
+
